@@ -157,7 +157,7 @@ handle_single_manifest_v2() {
 		fi
 
 		case "$layerMediaType" in
-			application/vnd.docker.image.rootfs.diff.tar.gzip)
+			application/vnd.docker.image.rootfs.diff.tar.gzip | application/vnd.oci.image.layer.v1.tar+gzip)
 				local layerTar="$layerId/layer.tar"
 				layerFiles=("${layerFiles[@]}" "$layerTar")
 				# TODO figure out why "-C -" doesn't work here
@@ -288,6 +288,7 @@ while [ $# -gt 0 ]; do
 			-H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
 			-H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
 			-H 'Accept: application/vnd.docker.distribution.manifest.v1+json' \
+			-H 'Accept: application/vnd.oci.image.index.v1+json' \
 			"$registryBase/v2/$image/manifests/$digest"
 	)"
 	if [ "${manifestJson:0:1}" != '{' ]; then
@@ -307,7 +308,7 @@ while [ $# -gt 0 ]; do
 				application/vnd.docker.distribution.manifest.v2+json)
 					handle_single_manifest_v2 "$manifestJson"
 					;;
-				application/vnd.docker.distribution.manifest.list.v2+json)
+				application/vnd.docker.distribution.manifest.list.v2+json | application/vnd.oci.image.index.v1+json)
 					layersFs="$(echo "$manifestJson" | jq --raw-output --compact-output '.manifests[]')"
 					IFS="$newlineIFS"
 					mapfile -t layers <<< "$layersFs"
@@ -330,6 +331,8 @@ while [ $# -gt 0 ]; do
 									-H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
 									-H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
 									-H 'Accept: application/vnd.docker.distribution.manifest.v1+json' \
+									-H 'Accept: application/vnd.oci.image.index.v1+json' \
+-H 'Accept: application/vnd.oci.image.manifest.v1+json' \
 									"$registryBase/v2/$image/manifests/$digest"
 							)"
 							handle_single_manifest_v2 "$submanifestJson"
