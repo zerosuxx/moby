@@ -109,21 +109,6 @@ func (e containerFileNotFound) Error() string {
 
 func (containerFileNotFound) NotFound() {}
 
-type invalidFilter struct {
-	filter string
-	value  interface{}
-}
-
-func (e invalidFilter) Error() string {
-	msg := "invalid filter '" + e.filter
-	if e.value != nil {
-		msg += fmt.Sprintf("=%s", e.value)
-	}
-	return msg + "'"
-}
-
-func (e invalidFilter) InvalidParameter() {}
-
 type startInvalidConfigError string
 
 func (e startInvalidConfigError) Error() string {
@@ -156,6 +141,17 @@ func setExitCodeFromError(setExitCode func(exitStatus), err error) error {
 
 	// set to 126 for container cmd can't be invoked errors
 	if contains(errDesc, syscall.EACCES.Error()) {
+		setExitCode(exitEaccess)
+		return startInvalidConfigError(errDesc)
+	}
+
+	// Go 1.20 changed the error for attempting to execute a directory from
+	// syscall.EACCESS to syscall.EISDIR. Unfortunately docker/cli checks
+	// whether the error message contains syscall.EACCESS.Error() to
+	// determine whether to exit with code 126 or 125, so we have little
+	// choice but to fudge the error string.
+	if contains(errDesc, syscall.EISDIR.Error()) {
+		errDesc += ": " + syscall.EACCES.Error()
 		setExitCode(exitEaccess)
 		return startInvalidConfigError(errDesc)
 	}

@@ -115,17 +115,28 @@ func (daemon *Daemon) containerCreate(ctx context.Context, opts createOpts) (con
 // Create creates a new container from the given configuration with a given name.
 func (daemon *Daemon) create(ctx context.Context, opts createOpts) (retC *container.Container, retErr error) {
 	var (
-		ctr   *container.Container
-		img   *image.Image
-		imgID image.ID
-		err   error
-		os    = runtime.GOOS
+		ctr         *container.Container
+		img         *image.Image
+		imgManifest *v1.Descriptor
+		imgID       image.ID
+		err         error
+		os          = runtime.GOOS
 	)
 
 	if opts.params.Config.Image != "" {
 		img, err = daemon.imageService.GetImage(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
 		if err != nil {
 			return nil, err
+		}
+		// when using the containerd store, we need to get the actual
+		// image manifest so we can store it and later deterministically
+		// resolve the specific image the container is running
+		if daemon.UsesSnapshotter() {
+			imgManifest, err = daemon.imageService.GetImageManifest(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
+			if err != nil {
+				logrus.WithError(err).Error("failed to find image manifest")
+				return nil, err
+			}
 		}
 		os = img.OperatingSystem()
 		imgID = img.ID()
@@ -169,13 +180,20 @@ func (daemon *Daemon) create(ctx context.Context, opts createOpts) (retC *contai
 	}
 
 	ctr.HostConfig.StorageOpt = opts.params.HostConfig.StorageOpt
+	ctr.ImageManifest = imgManifest
 
-	// Set RWLayer for container after mount labels have been set
-	rwLayer, err := daemon.imageService.CreateLayer(ctr, setupInitLayer(daemon.idMapping))
-	if err != nil {
-		return nil, errdefs.System(err)
+	if daemon.UsesSnapshotter() {
+		if err := daemon.imageService.PrepareSnapshot(ctx, ctr.ID, opts.params.Config.Image, opts.params.Platform); err != nil {
+			return nil, err
+		}
+	} else {
+		// Set RWLayer for container after mount labels have been set
+		rwLayer, err := daemon.imageService.CreateLayer(ctr, setupInitLayer(daemon.idMapping))
+		if err != nil {
+			return nil, errdefs.System(err)
+		}
+		ctr.RWLayer = rwLayer
 	}
-	ctr.RWLayer = rwLayer
 
 	current := idtools.CurrentIdentity()
 	if err := idtools.MkdirAndChown(ctr.Root, 0710, idtools.Identity{UID: current.UID, GID: daemon.IdentityMapping().RootPair().GID}); err != nil {

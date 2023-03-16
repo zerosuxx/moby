@@ -26,7 +26,7 @@ type imageBackend interface {
 	ImageHistory(ctx context.Context, imageName string) ([]*image.HistoryResponseItem, error)
 	Images(ctx context.Context, opts types.ImageListOptions) ([]*types.ImageSummary, error)
 	GetImage(ctx context.Context, refOrID string, options image.GetImageOpts) (*dockerimage.Image, error)
-	TagImage(imageName, repository, tag string) (string, error)
+	TagImage(ctx context.Context, id dockerimage.ID, newRef reference.Named) error
 	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (*types.ImagesPruneReport, error)
 }
 
@@ -39,5 +39,8 @@ type importExportBackend interface {
 type registryBackend interface {
 	PullImage(ctx context.Context, image, tag string, platform *specs.Platform, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) error
 	PushImage(ctx context.Context, image, tag string, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) error
-	SearchRegistryForImages(ctx context.Context, searchFilters filters.Args, term string, limit int, authConfig *registry.AuthConfig, metaHeaders map[string][]string) (*registry.SearchResults, error)
+}
+
+type Searcher interface {
+	Search(ctx context.Context, searchFilters filters.Args, term string, limit int, authConfig *registry.AuthConfig, metaHeaders map[string][]string) ([]registry.SearchResult, error)
 }

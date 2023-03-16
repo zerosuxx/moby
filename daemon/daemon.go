@@ -46,6 +46,7 @@ import (
 	"github.com/docker/docker/libnetwork"
 	"github.com/docker/docker/libnetwork/cluster"
 	nwconfig "github.com/docker/docker/libnetwork/config"
+	"github.com/docker/docker/pkg/authorization"
 	"github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/plugingetter"
@@ -81,7 +82,7 @@ type Daemon struct {
 	configStore           *config.Config
 	statsCollector        *stats.Collector
 	defaultLogConfig      containertypes.LogConfig
-	registryService       registry.Service
+	registryService       *registry.Service
 	EventsService         *events.Events
 	netController         *libnetwork.Controller
 	volumes               *volumesservice.VolumesService
@@ -217,6 +218,11 @@ func (daemon *Daemon) RegistryHosts() docker.RegistryHosts {
 	return resolver.NewRegistryConfig(m)
 }
 
+// layerAccessor may be implemented by ImageService
+type layerAccessor interface {
+	GetLayerByID(cid string) (layer.RWLayer, error)
+}
+
 func (daemon *Daemon) restore() error {
 	var mapLock sync.Mutex
 	containers := make(map[string]*container.Container)
@@ -258,12 +264,14 @@ func (daemon *Daemon) restore() error {
 				log.Debugf("not restoring container because it was created with another storage driver (%s)", c.Driver)
 				return
 			}
-			rwlayer, err := daemon.imageService.GetLayerByID(c.ID)
-			if err != nil {
-				log.WithError(err).Error("failed to load container mount")
-				return
+			if accessor, ok := daemon.imageService.(layerAccessor); ok {
+				rwlayer, err := accessor.GetLayerByID(c.ID)
+				if err != nil {
+					log.WithError(err).Error("failed to load container mount")
+					return
+				}
+				c.RWLayer = rwlayer
 			}
-			c.RWLayer = rwlayer
 			log.WithFields(logrus.Fields{
 				"running": c.IsRunning(),
 				"paused":  c.IsPaused(),
@@ -721,7 +729,7 @@ func (daemon *Daemon) IsSwarmCompatible() error {
 
 // NewDaemon sets up everything for the daemon to be able to service
 // requests from the webserver.
-func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.Store) (daemon *Daemon, err error) {
+func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.Store, authzMiddleware *authorization.Middleware) (daemon *Daemon, err error) {
 	// Verify platform-specific requirements.
 	// TODO(thaJeztah): this should be called before we try to create the daemon; perhaps together with the config validation.
 	if err := checkSystem(); err != nil {
@@ -908,15 +916,17 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 			}
 		}
 
-		var rt types.Runtime
+		var (
+			shim     string
+			shimOpts interface{}
+		)
 		if runtime.GOOS != "windows" {
-			rtPtr, err := d.getRuntime(config.GetDefaultRuntimeName())
+			shim, shimOpts, err = d.getRuntime(config.GetDefaultRuntimeName())
 			if err != nil {
 				return nil, err
 			}
-			rt = *rtPtr
 		}
-		return pluginexec.New(ctx, getPluginExecRoot(config), pluginCli, config.ContainerdPluginNamespace, m, rt)
+		return pluginexec.New(ctx, getPluginExecRoot(config), pluginCli, config.ContainerdPluginNamespace, m, shim, shimOpts)
 	}
 
 	// Plugin system initialization should happen before restore. Do not change order.
@@ -928,7 +938,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		RegistryService:    registryService,
 		LiveRestoreEnabled: config.LiveRestoreEnabled,
 		LogPluginEvent:     d.LogPluginEvent, // todo: make private
-		AuthzMiddleware:    config.AuthzMiddleware,
+		AuthzMiddleware:    authzMiddleware,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "couldn't create plugin manager")
@@ -1002,7 +1012,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		if err := configureKernelSecuritySupport(config, driverName); err != nil {
 			return nil, err
 		}
-		d.imageService = ctrd.NewService(d.containerdCli, driverName, d, d.registryService)
+		d.imageService = ctrd.NewService(d.containerdCli, d.containers, driverName, d, d.registryService)
 	} else {
 		layerStore, err := layer.NewStoreFromOptions(layer.StoreOptions{
 			Root:                      config.Root,
@@ -1259,42 +1269,13 @@ func (daemon *Daemon) Shutdown(ctx context.Context) error {
 }
 
 // Mount sets container.BaseFS
-// (is it not set coming in? why is it unset?)
 func (daemon *Daemon) Mount(container *container.Container) error {
-	if container.RWLayer == nil {
-		return errors.New("RWLayer of container " + container.ID + " is unexpectedly nil")
-	}
-	dir, err := container.RWLayer.Mount(container.GetMountLabel())
-	if err != nil {
-		return err
-	}
-	logrus.WithField("container", container.ID).Debugf("container mounted via layerStore: %v", dir)
-
-	if container.BaseFS != "" && container.BaseFS != dir {
-		// The mount path reported by the graph driver should always be trusted on Windows, since the
-		// volume path for a given mounted layer may change over time.  This should only be an error
-		// on non-Windows operating systems.
-		if runtime.GOOS != "windows" {
-			daemon.Unmount(container)
-			return fmt.Errorf("driver %s is returning inconsistent paths for container %s ('%s' then '%s')",
-				container.Driver, container.ID, container.BaseFS, dir)
-		}
-	}
-	container.BaseFS = dir // TODO: combine these fields
-	return nil
+	return daemon.imageService.Mount(context.Background(), container)
 }
 
 // Unmount unsets the container base filesystem
 func (daemon *Daemon) Unmount(container *container.Container) error {
-	if container.RWLayer == nil {
-		return errors.New("RWLayer of container " + container.ID + " is unexpectedly nil")
-	}
-	if err := container.RWLayer.Unmount(); err != nil {
-		logrus.WithField("container", container.ID).WithError(err).Error("error unmounting container")
-		return err
-	}
-
-	return nil
+	return daemon.imageService.Unmount(context.Background(), container)
 }
 
 // Subnets return the IPv4 and IPv6 subnets of networks that are manager by Docker.
@@ -1476,6 +1457,11 @@ func (daemon *Daemon) IdentityMapping() idtools.IdentityMapping {
 // ImageService returns the Daemon's ImageService
 func (daemon *Daemon) ImageService() ImageService {
 	return daemon.imageService
+}
+
+// RegistryService returns the Daemon's RegistryService
+func (daemon *Daemon) RegistryService() *registry.Service {
+	return daemon.registryService
 }
 
 // BuilderBackend returns the backend used by builder

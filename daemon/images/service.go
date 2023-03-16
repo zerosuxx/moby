@@ -8,12 +8,12 @@ import (
 	"github.com/containerd/containerd/leases"
 	"github.com/docker/docker/container"
 	daemonevents "github.com/docker/docker/daemon/events"
+	"github.com/docker/docker/distribution"
 	"github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/distribution/xfer"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	dockerreference "github.com/docker/docker/reference"
-	"github.com/docker/docker/registry"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
@@ -39,7 +39,7 @@ type ImageServiceConfig struct {
 	MaxConcurrentUploads      int
 	MaxDownloadAttempts       int
 	ReferenceStore            dockerreference.Store
-	RegistryService           registry.Service
+	RegistryService           distribution.RegistryResolver
 	ContentStore              content.Store
 	Leases                    leases.Manager
 	ContentNamespace          string
@@ -73,7 +73,7 @@ type ImageService struct {
 	layerStore                layer.Store
 	pruneRunning              int32
 	referenceStore            dockerreference.Store
-	registryService           registry.Service
+	registryService           distribution.RegistryResolver
 	uploadManager             *xfer.LayerUploadManager
 	leases                    leases.Manager
 	content                   content.Store
@@ -136,7 +136,7 @@ func (i *ImageService) CreateLayer(container *container.Container, initFunc laye
 }
 
 // GetLayerByID returns a layer by ID
-// called from daemon.go Daemon.restore(), and Daemon.containerExport().
+// called from daemon.go Daemon.restore().
 func (i *ImageService) GetLayerByID(cid string) (layer.RWLayer, error) {
 	return i.layerStore.GetRWLayer(cid)
 }
@@ -169,7 +169,7 @@ func (i *ImageService) StorageDriver() string {
 }
 
 // ReleaseLayer releases a layer allowing it to be removed
-// called from delete.go Daemon.cleanupContainer(), and Daemon.containerExport()
+// called from delete.go Daemon.cleanupContainer().
 func (i *ImageService) ReleaseLayer(rwlayer layer.RWLayer) error {
 	metaData, err := i.layerStore.ReleaseRWLayer(rwlayer)
 	layer.LogReleaseMetadata(metaData)

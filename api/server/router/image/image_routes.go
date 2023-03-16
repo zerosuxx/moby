@@ -72,25 +72,9 @@ func (ir *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrit
 	} else { // import
 		src := r.Form.Get("fromSrc")
 
-		var ref reference.Named
-		if repo != "" {
-			var err error
-			ref, err = reference.ParseNormalizedNamed(repo)
-			if err != nil {
-				return errdefs.InvalidParameter(err)
-			}
-			if _, isDigested := ref.(reference.Digested); isDigested {
-				return errdefs.InvalidParameter(errors.New("cannot import digest reference"))
-			}
-
-			if tag != "" {
-				ref, err = reference.WithTag(ref, tag)
-				if err != nil {
-					return errdefs.InvalidParameter(err)
-				}
-			} else {
-				ref = reference.TagNameOnly(ref)
-			}
+		tagRef, err := httputils.RepoTagReference(repo, tag)
+		if err != nil {
+			return errdefs.InvalidParameter(err)
 		}
 
 		if len(comment) == 0 {
@@ -121,7 +105,7 @@ func (ir *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrit
 		}
 
 		var id image.ID
-		id, progressErr = ir.backend.ImportImage(ctx, ref, platform, comment, layerReader, r.Form["changes"])
+		id, progressErr = ir.backend.ImportImage(ctx, tagRef, platform, comment, layerReader, r.Form["changes"])
 
 		if progressErr == nil {
 			output.Write(streamformatter.FormatStatus("", id.String()))
@@ -353,6 +337,22 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 		return err
 	}
 
+	for _, img := range images {
+		if versions.LessThan(version, "1.43") {
+			if len(img.RepoTags) == 0 && len(img.RepoDigests) == 0 {
+				img.RepoTags = append(img.RepoTags, "<none>:<none>")
+				img.RepoDigests = append(img.RepoDigests, "<none>@<none>")
+			}
+		} else {
+			if img.RepoTags == nil {
+				img.RepoTags = []string{}
+			}
+			if img.RepoDigests == nil {
+				img.RepoDigests = []string{}
+			}
+		}
+	}
+
 	return httputils.WriteJSON(w, http.StatusOK, images)
 }
 
@@ -369,7 +369,18 @@ func (ir *imageRouter) postImagesTag(ctx context.Context, w http.ResponseWriter,
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
-	if _, err := ir.backend.TagImage(vars["name"], r.Form.Get("repo"), r.Form.Get("tag")); err != nil {
+
+	ref, err := httputils.RepoTagReference(r.Form.Get("repo"), r.Form.Get("tag"))
+	if ref == nil || err != nil {
+		return errdefs.InvalidParameter(err)
+	}
+
+	img, err := ir.backend.GetImage(ctx, vars["name"], opts.GetImageOpts{})
+	if err != nil {
+		return errdefs.NotFound(err)
+	}
+
+	if err := ir.backend.TagImage(ctx, img.ID(), ref); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusCreated)
@@ -404,11 +415,11 @@ func (ir *imageRouter) getImagesSearch(ctx context.Context, w http.ResponseWrite
 	// For a search it is not an error if no auth was given. Ignore invalid
 	// AuthConfig to increase compatibility with the existing API.
 	authConfig, _ := registry.DecodeAuthConfig(r.Header.Get(registry.AuthHeader))
-	query, err := ir.backend.SearchRegistryForImages(ctx, searchFilters, r.Form.Get("term"), limit, authConfig, headers)
+	res, err := ir.searcher.Search(ctx, searchFilters, r.Form.Get("term"), limit, authConfig, headers)
 	if err != nil {
 		return err
 	}
-	return httputils.WriteJSON(w, http.StatusOK, query.Results)
+	return httputils.WriteJSON(w, http.StatusOK, res)
 }
 
 func (ir *imageRouter) postImagesPrune(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {

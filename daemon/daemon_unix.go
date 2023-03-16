@@ -18,9 +18,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containerd/cgroups"
-	statsV1 "github.com/containerd/cgroups/stats/v1"
-	statsV2 "github.com/containerd/cgroups/v2/stats"
+	"github.com/containerd/cgroups/v3"
+	statsV1 "github.com/containerd/cgroups/v3/cgroup1/stats"
+	statsV2 "github.com/containerd/cgroups/v3/cgroup2/stats"
 	"github.com/containerd/containerd/pkg/userns"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/blkiodev"
@@ -705,7 +705,7 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.
 		hostConfig.Runtime = daemon.configStore.GetDefaultRuntimeName()
 	}
 
-	if _, err := daemon.getRuntime(hostConfig.Runtime); err != nil {
+	if _, _, err := daemon.getRuntime(hostConfig.Runtime); err != nil {
 		return warnings, err
 	}
 
@@ -1394,13 +1394,19 @@ func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *
 // conditionalMountOnStart is a platform specific helper function during the
 // container start to call mount.
 func (daemon *Daemon) conditionalMountOnStart(container *container.Container) error {
-	return daemon.Mount(container)
+	if !daemon.UsesSnapshotter() {
+		return daemon.Mount(container)
+	}
+	return nil
 }
 
 // conditionalUnmountOnCleanup is a platform specific helper function called
 // during the cleanup of a container to unmount.
 func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container) error {
-	return daemon.Unmount(container)
+	if !daemon.UsesSnapshotter() {
+		return daemon.Unmount(container)
+	}
+	return nil
 }
 
 func copyBlkioEntry(entries []*statsV1.BlkIOEntry) []types.BlkioStatEntry {
